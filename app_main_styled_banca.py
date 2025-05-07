@@ -1,0 +1,209 @@
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+import matplotlib.pyplot as plt
+
+# CONFIGURACIÓN GENERAL
+st.set_page_config(page_title="SmartBet AI", layout="wide")
+st.markdown("<h1 style='text-align: center; color: #1f77b4;'>⚽ SmartBet AI – Apuestas Inteligentes con Machine Learning</h1>", unsafe_allow_html=True)
+st.markdown("---")
+
+# ----------- MODELO Y ELO -----------
+@st.cache_data
+def cargar_datos_y_modelo():
+    urls = [
+        "https://www.football-data.co.uk/mmz4281/2324/E0.csv",
+        "https://www.football-data.co.uk/mmz4281/2223/E0.csv",
+        "https://www.football-data.co.uk/mmz4281/2122/E0.csv"
+    ]
+    columnas = ["Date", "HomeTeam", "AwayTeam", "FTR", "B365H", "B365D", "B365A"]
+    df = pd.concat([pd.read_csv(url, usecols=lambda c: c in columnas, encoding="ISO-8859-1") for url in urls])
+    df.dropna(inplace=True)
+    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True)
+    df.sort_values("Date", inplace=True)
+
+    elo_ratings = {}
+    history = {}
+    K = 30
+    default_elo = 1500
+
+    def get_elo(team):
+        return elo_ratings.get(team, default_elo)
+
+    def update_elo(winner, loser, draw=False):
+        Ra = get_elo(winner)
+        Rb = get_elo(loser)
+        Ea = 1 / (1 + 10 ** ((Rb - Ra) / 400))
+        Eb = 1 / (1 + 10 ** ((Ra - Rb) / 400))
+        if draw:
+            Sa, Sb = 0.5, 0.5
+        else:
+            Sa, Sb = 1.0, 0.0
+        elo_ratings[winner] = Ra + K * (Sa - Ea)
+        elo_ratings[loser] = Rb + K * (Sb - Eb)
+
+    elos_home, elos_away = [], []
+    for _, row in df.iterrows():
+        home, away, result = row["HomeTeam"], row["AwayTeam"], row["FTR"]
+        elos_home.append(get_elo(home))
+        elos_away.append(get_elo(away))
+        if result == "H":
+            update_elo(home, away)
+        elif result == "A":
+            update_elo(away, home)
+        elif result == "D":
+            update_elo(home, away, draw=True)
+
+        for team in [home, away]:
+            history.setdefault(team, []).append(get_elo(team))
+
+    df["elo_home"] = elos_home
+    df["elo_away"] = elos_away
+
+    X = df[["elo_home", "elo_away"]]
+    y = df["FTR"]
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X, y)
+
+    return model, elo_ratings, history
+
+model, elo_ratings, history = cargar_datos_y_modelo()
+
+# ----------- MENÚ DE FUNCIONES -----------
+opcion = st.sidebar.radio("🧭 Navegación", [
+    "🔮 Predicción Manual",
+    "📊 Ranking ELO + Evolución",
+    "💸 Mejores Apuestas Próxima Jornada",
+    "💼 Gestión de Banca y Simulador de Ganancias"
+])
+
+# ----------- PREDICCIÓN MANUAL -----------
+if opcion == "🔮 Predicción Manual":
+    st.markdown("### 🔮 Predicción entre equipos")
+    col1, col2 = st.columns(2)
+    equipos = sorted(list(elo_ratings.keys()))
+    equipo_local = col1.selectbox("Equipo Local", equipos)
+    equipo_visitante = col2.selectbox("Equipo Visitante", equipos)
+
+    elo_local = elo_ratings.get(equipo_local, 1500)
+    elo_visitante = elo_ratings.get(equipo_visitante, 1500)
+
+    X_pred = pd.DataFrame([[elo_local, elo_visitante]], columns=["elo_home", "elo_away"])
+    proba = model.predict_proba(X_pred)[0]
+    pred = model.predict(X_pred)[0]
+
+    st.success(f"🏁 Resultado probable: **{pred}**")
+    st.info("📊 Probabilidades:")
+    st.write({c: round(p, 2) for c, p in zip(model.classes_, proba)})
+
+# ----------- RANKING ELO + HISTÓRICO -----------
+elif opcion == "📊 Ranking ELO + Evolución":
+    st.markdown("### 📊 Tabla de clasificación ELO")
+    ranking = pd.DataFrame({
+        "Equipo": list(elo_ratings.keys()),
+        "ELO": [round(elo_ratings[k], 1) for k in elo_ratings]
+    }).sort_values("ELO", ascending=False).reset_index(drop=True)
+
+    st.dataframe(ranking.style.highlight_max(axis=0, color="lightgreen"), use_container_width=True)
+
+    st.markdown("### 📈 Evolución de ELO")
+    equipo = st.selectbox("Selecciona equipo para graficar", list(history.keys()))
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(history[equipo], label=equipo, linewidth=2)
+    ax.set_ylabel("Rating ELO")
+    ax.set_title(f"Evolución histórica de {equipo}")
+    st.pyplot(fig)
+
+# ----------- VALUE BETS PRÓXIMA JORNADA -----------
+elif opcion == "💸 Mejores Apuestas Próxima Jornada":
+    st.markdown("### 💸 Detectar mejores apuestas futuras")
+
+    ejemplo = {
+        "Date": ["2025-05-10", "2025-05-11"],
+        "HomeTeam": ["Liverpool", "Man United"],
+        "AwayTeam": ["Arsenal", "Chelsea"],
+        "B365H": [2.1, 2.3],
+        "B365D": [3.3, 3.4],
+        "B365A": [3.5, 3.1]
+    }
+    df_ejemplo = pd.DataFrame(ejemplo)
+    with st.expander("📁 Ver ejemplo de plantilla"):
+        st.dataframe(df_ejemplo)
+
+    archivo = st.file_uploader("Sube archivo CSV con partidos futuros", type=["csv"])
+
+    if archivo:
+        partidos = pd.read_csv(archivo)
+        partidos["elo_home"] = partidos["HomeTeam"].map(lambda t: elo_ratings.get(t, 1500))
+        partidos["elo_away"] = partidos["AwayTeam"].map(lambda t: elo_ratings.get(t, 1500))
+
+        X = partidos[["elo_home", "elo_away"]]
+        probabilidades = model.predict_proba(X)
+
+        predicciones = []
+        for i, row in partidos.iterrows():
+            prob = dict(zip(model.classes_, probabilidades[i]))
+            ev_H = prob["H"] * row["B365H"]
+            ev_D = prob["D"] * row["B365D"]
+            ev_A = prob["A"] * row["B365A"]
+            mejores = {
+                "Partido": f'{row["HomeTeam"]} vs {row["AwayTeam"]}',
+                "Mejor Apuesta": max(
+                    [("Local", ev_H), ("Empate", ev_D), ("Visitante", ev_A)],
+                    key=lambda x: x[1]
+                )[0],
+                "Valor Esperado": round(max(ev_H, ev_D, ev_A), 2),
+                "Probabilidad estimada": round(max(prob["H"], prob["D"], prob["A"]), 2),
+                "Cuota": max(row["B365H"], row["B365D"], row["B365A"]),
+            }
+            predicciones.append(mejores)
+
+        st.markdown("### ✅ Apuestas recomendadas")
+        st.dataframe(pd.DataFrame(predicciones).sort_values("Valor Esperado", ascending=False), use_container_width=True)
+
+# ----------- GESTIÓN DE BANCA Y SIMULADOR -----------
+elif opcion == "💼 Gestión de Banca y Simulador de Ganancias":
+    st.markdown("### 💼 Simulador de Ganancias con Estrategia de Apuestas")
+
+    banca_inicial = st.number_input("Define tu banca inicial ($)", min_value=10, value=1000, step=10)
+    monto_apuesta = st.number_input("Monto por apuesta ($)", min_value=1, value=50, step=1)
+    tasa_acierto = st.slider("Tasa estimada de acierto del modelo (%)", 30, 90, 55)
+
+    archivo_valores = st.file_uploader("Sube un archivo CSV con predicciones y valor esperado", type=["csv"])
+
+    if archivo_valores:
+        df_sim = pd.read_csv(archivo_valores)
+        resultados = []
+        banca = banca_inicial
+        historial = [banca]
+
+        for _, row in df_sim.iterrows():
+            cuota = row["Cuota"]
+            valor_esperado = row["Valor Esperado"]
+            if valor_esperado < 1.05:
+                continue  # solo simular value bets
+            gana = np.random.rand() < (tasa_acierto / 100)
+            if gana:
+                banca += monto_apuesta * (cuota - 1)
+            else:
+                banca -= monto_apuesta
+            historial.append(banca)
+            resultados.append({
+                "Partido": row["Partido"],
+                "Resultado": "✅ Ganada" if gana else "❌ Perdida",
+                "Banca post-apuesta": round(banca, 2)
+            })
+
+        st.markdown("### 📊 Resultados de la simulación")
+        st.dataframe(pd.DataFrame(resultados), use_container_width=True)
+        st.success(f"Ganancia final: ${round(banca - banca_inicial, 2)}")
+
+        st.markdown("### 📈 Evolución del bankroll")
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.plot(historial, linewidth=2)
+        ax.set_title("Banca acumulada")
+        ax.set_xlabel("Número de apuestas")
+        ax.set_ylabel("Banca ($)")
+        st.pyplot(fig)
